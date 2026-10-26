@@ -4,8 +4,53 @@ import dotenv from "dotenv";
 dotenv.config();
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: { timeout: 12000 },
+  httpOptions: {
+    timeout: 30000,
+    retryOptions: {
+      attempts: 1,
+      initialDelay: 1,
+      maxDelay: 2,
+    },
+  },
 });
+
+function getErrorDetails(error) {
+  if (!(error instanceof Error)) return { value: error };
+
+  return {
+    name: error.name,
+    message: error.message,
+    code: error.code,
+    status: error.status,
+    cause: error.cause ? getErrorDetails(error.cause) : undefined,
+    stack: error.stack,
+  };
+}
+
+function isRetryableGeminiError(error) {
+  if (!(error instanceof Error)) return false;
+
+  const status = Number(error.status ?? error.code);
+  const retryableNetworkCodes = new Set([
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "ETIMEDOUT",
+    "ENOTFOUND",
+    "EAI_AGAIN",
+    "UND_ERR_CONNECT_TIMEOUT",
+    "UND_ERR_HEADERS_TIMEOUT",
+    "UND_ERR_SOCKET",
+    "ABORT_ERR",
+  ]);
+
+  return (
+    status === 429 ||
+    status >= 500 ||
+    error.name === "AbortError" ||
+    retryableNetworkCodes.has(error.code) ||
+    isRetryableGeminiError(error.cause)
+  );
+}
 
 // ── 1. Split long text into overlapping chunks ──
 export function splitTextIntoChunks(text, chunkSize = 700, overlap = 120) {
@@ -38,7 +83,10 @@ export async function generateEmbedding(text) {
       });
       return response.embeddings[0].values;
     } catch (err) {
-      console.warn(`Embedding model ${m.name} failed: ${err.message}. Trying next...`);
+      console.error(
+        `Embedding model ${m.name} failed; trying next:`,
+        JSON.stringify(getErrorDetails(err), null, 2),
+      );
       lastError = err;
     }
   }
@@ -74,20 +122,34 @@ ${contextBlock}
 STUDENT QUESTION:
 ${question}`;
 
-  const modelsToTry = ["gemini-3.8-flash", "gemini-3.5-flash-lite"];
+  const modelsToTry = ["gemini-3.5-flash-lite", "gemini-3.8-flash"];
+  const maxAttempts = 2;
   let lastError;
 
-  for (const modelName of modelsToTry) {
-    try {
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: prompt,
-      });
-      return response.text;
-    } catch (err) {
-      console.warn(`Model ${modelName} failed: ${err.message}. Trying next...`);
-      lastError = err;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let shouldRetry = false;
+
+    for (const modelName of modelsToTry) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: prompt,
+        });
+        return response.text;
+      } catch (err) {
+        console.error(
+          `Attempt ${attempt} - Gemini model ${modelName} failed:`,
+          JSON.stringify(getErrorDetails(err), null, 2),
+        );
+        lastError = err;
+        shouldRetry ||= isRetryableGeminiError(err);
+      }
     }
+
+    if (!shouldRetry || attempt === maxAttempts) break;
+
+    console.warn("All Gemini models failed with a transient error. Retrying in 2 seconds...");
+    await new Promise((resolve) => setTimeout(resolve, 2000));
   }
 
   throw new Error(`All Gemini models failed. Last error: ${lastError.message}`);
