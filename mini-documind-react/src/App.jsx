@@ -11,6 +11,8 @@ import {
   X,
 } from "lucide-react";
 
+const API_BASE = "https://documind-ai-qttq.onrender.com/api";
+
 async function readResponse(response) {
   const data = await response.json();
   if (!response.ok) {
@@ -133,7 +135,9 @@ export default function App() {
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const response = await fetch("/api/p1/upload", { method: "POST", body: formData });
+      
+      const response = await fetch(`${API_BASE}/p1/upload`, { method: "POST", body: formData });
+      
       const data = await readResponse(response);
       setDocInfo(data);
       setMessages([
@@ -168,11 +172,12 @@ export default function App() {
     setLoading(true);
 
     try {
-      const response = await fetch("/api/p1/ask", {
+      const response = await fetch(`${API_BASE}/p1/ask`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ documentId: docInfo.documentId, question: trimmed }),
       });
+      
       const data = await readResponse(response);
       setMessages((previous) => [
         ...previous.filter((message) => message.id !== pendingId),
